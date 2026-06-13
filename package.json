@@ -1,0 +1,29 @@
+{
+  "name": "touch-tone",
+  "author": "sheppoor",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Touch Tone",
+    "uuid": "45ac6f66-9791-4c68-8921-1f9a453636cf",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": ["emery"],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [],
+    "resources": {
+      "media": [
+        {
+          "type": "png",
+          "name": "APP_ICON",
+          "file": "images/app_icon.png",
+          "menuIcon": true,
+          "targetPlatforms": ["emery"]
+        }
+      ]
+    }
+  }
+}

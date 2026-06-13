@@ -1,0 +1,30 @@
+# Pebble build artifacts
+build/
+*.pbw
+.pebble-cache/
+appinfo.json          # generated from package.json at build time
+waf
+.waf*
+.lock-waf*
+
+# Python (tools/generate_audio.py)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+.claude/
+
+# Note: src/c/touch_tone_audio.h is auto-generated but IS committed
+# (see App Store Submission Checklist in PLAN.md).
+
+# Emulator screenshots
+pebble_screenshot_*.png
+
+# Random others
+notes/
