@@ -86,9 +86,18 @@ static Window *s_window = NULL;
 static Layer  *s_canvas = NULL;
 
 static int      s_active_key = -1;        /* -1 = none, 0-11 = active key  */
-static uint32_t s_tone_start_ms = 0;      /* now_ms() when tone started     */
-static AppTimer *s_min_duration_timer = NULL;
-static bool     s_stop_pending = false;   /* finger lifted before 50ms floor*/
+static AppTimer *s_floor_timer = NULL;    /* enforces the TONE_FLOOR_MS minimum  */
+static bool     s_key_finger_down = false;/* is the active key's finger still down? */
+
+/* One-slot queue for a keypad touch that arrives during the floor window
+ * (last-touch-wins: a newer touch overwrites an older queued one). */
+typedef struct {
+  bool pending;       /* a queued touch is waiting                  */
+  int  key_index;     /* which key (0-11)                           */
+  bool finger_down;   /* is the queued finger still physically held? */
+} QueuedTouch;
+static QueuedTouch s_queued = { .pending = false, .key_index = -1, .finger_down = false };
+
 static bool     s_dial_playing = false;   /* true while Enter is held        */
 static bool     s_touch_enabled = false;
 static bool     s_app_in_focus = true;    /* false while a notification/overlay covers us */
@@ -118,7 +127,7 @@ static AppTimer       *s_refill_timer = NULL;
 static uint32_t        s_stream_start_ms = 0; /* now_ms() of first write       */
 static uint32_t        s_bytes_written = 0;   /* total bytes handed to speaker  */
 
-#define MIN_TONE_MS 50
+#define TONE_FLOOR_MS 250   /* minimum play duration for a keypad touch tone */
 
 /* Busy signal cadence: 0.5s ON, 0.5s OFF. At 8 kHz that is 4000 samples per
  * phase = exactly 5 buffers of TONE_BUFFER_SAMPLES (800), so the phase always
@@ -161,8 +170,8 @@ static const SitPhase SIT_SEQUENCE[] = {
                                 /* sound (key tone or dial tone). Lower = snappier */
                                 /* start, but less cushion against underruns.     */
 
-/* Fixed playback volume (0-100). The Up/Down volume control was removed. */
-#define SPEAKER_VOLUME     66
+/* Fixed playback volume (0-100). */
+#define SPEAKER_VOLUME     50
 
 /* ------------------------------------------------------------------ */
 /* Real-time DTMF synthesis (keypad tones only).                       */
@@ -458,31 +467,72 @@ static void stop_audio(void) {
   stream_stop();
 }
 
-/* ------------------------------------------------------------------ */
-/* Minimum-duration floor timer                                        */
-/* ------------------------------------------------------------------ */
-static void min_duration_cb(void *ctx) {
-  s_min_duration_timer = NULL;
-  if (s_stop_pending) {
-    s_stop_pending = false;
-    stop_audio();
-    s_active_key = -1;
-  }
-}
-
 /* Clear dial-tone bookkeeping (does not touch the stream itself). */
 static void cancel_dial_state(void) {
   s_dial_playing = false;
 }
 
-/* Clear key-tone bookkeeping (does not touch the stream itself). */
-static void cancel_key_state(void) {
-  if (s_min_duration_timer) {
-    app_timer_cancel(s_min_duration_timer);
-    s_min_duration_timer = NULL;
+/* ------------------------------------------------------------------ */
+/* Keypad tone floor (TONE_FLOOR_MS minimum) + one-slot touch queue.   */
+/*                                                                     */
+/* A keypad tone always sounds for at least TONE_FLOOR_MS. A touch that */
+/* arrives while the floor is running is held in a single-slot queue    */
+/* (last-touch-wins) and started when the floor completes. NOTE: we use  */
+/* stop_audio() (not bare speaker_stop()) so the synth's refill timer is  */
+/* cancelled too — otherwise it would keep generating samples.           */
+/* ------------------------------------------------------------------ */
+static void floor_timer_cb(void *context);  /* fwd decl (mutually recursive) */
+
+static void start_key_tone(int key_index) {
+  s_active_key = key_index;
+  s_key_finger_down = false;   /* caller sets true if the finger is down */
+  play_dtmf(key_index);        /* real-time phase-accumulator synthesis  */
+  s_floor_timer = app_timer_register(TONE_FLOOR_MS, floor_timer_cb, NULL);
+}
+
+static void floor_timer_cb(void *context) {
+  s_floor_timer = NULL;  /* fired — clear the handle */
+
+  if (s_queued.pending) {
+    /* A newer touch arrived during the floor window: switch to it. */
+    int  queued_key         = s_queued.key_index;
+    bool queued_finger_down = s_queued.finger_down;
+    s_queued.pending = false;
+    s_queued.key_index = -1;
+    s_queued.finger_down = false;
+
+    stop_audio();        /* stop current tone + cancel refill timer + reset stream */
+    s_active_key = -1;
+    start_key_tone(queued_key);          /* registers a fresh TONE_FLOOR_MS floor */
+    s_key_finger_down = queued_finger_down;
+    return;
   }
-  s_stop_pending = false;
+
+  if (s_key_finger_down) {
+    /* Finger still held — keep playing; the stop happens on liftoff. */
+    return;
+  }
+
+  /* Finger was lifted during the floor window — stop now. */
+  stop_audio();
   s_active_key = -1;
+}
+
+/* A side button (Up/Down/Select) preempts the keypad: cancel the floor, stop any
+ * active key tone, and discard a queued touch, so the button's own tone proceeds. */
+static void cancel_keypad_for_button(void) {
+  if (s_floor_timer != NULL) {
+    app_timer_cancel(s_floor_timer);
+    s_floor_timer = NULL;
+  }
+  if (s_active_key != -1) {
+    stop_audio();
+    s_active_key = -1;
+  }
+  s_queued.pending = false;
+  s_queued.key_index = -1;
+  s_queued.finger_down = false;
+  s_key_finger_down = false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -507,31 +557,42 @@ static void touch_handler(const TouchEvent *event, void *context) {
   if (!s_app_in_focus) return;
   switch (event->type) {
     case TouchEvent_Touchdown: {
-      if (s_busy_playing) break;      /* single voice: busy signal owns the speaker */
-      if (s_sit_playing) break;       /* single voice: SIT is playing (non-interruptible) */
-      if (s_active_key != -1) break;  /* single voice: ignore new touch */
+      if (s_busy_playing) return;   /* single voice: busy signal owns the speaker */
+      if (s_sit_playing) return;    /* single voice: SIT is playing (non-interruptible) */
       int key = hit_test_key(event->x, event->y);
-      if (key == -1) break;
-      cancel_dial_state();  /* a key tone preempts the dial tone (one voice) */
-      play_dtmf(key);
-      s_active_key = key;
-      s_stop_pending = false;
-      s_tone_start_ms = now_ms();
+      if (key == -1) return;        /* touch landed in a gap — ignore */
+
+      if (s_active_key != -1) {
+        /* A keypad tone is already sounding (its floor may or may not still be
+         * running). Queue this touch, last-touch-wins. */
+        s_queued.pending = true;
+        s_queued.key_index = key;
+        s_queued.finger_down = true;
+        return;
+      }
+
+      /* No active keypad tone — start now, preempting a held dial tone. */
+      cancel_dial_state();
+      start_key_tone(key);
+      s_key_finger_down = true;
       break;
     }
     case TouchEvent_Liftoff: {
-      if (s_active_key == -1) break;
-      uint32_t elapsed = now_ms() - s_tone_start_ms;
-      if (elapsed < MIN_TONE_MS) {
-        /* Enforce the 50 ms floor: defer the stop. */
-        s_stop_pending = true;
-        if (s_min_duration_timer) app_timer_cancel(s_min_duration_timer);
-        s_min_duration_timer =
-            app_timer_register(MIN_TONE_MS - elapsed, min_duration_cb, NULL);
-      } else {
-        stop_audio();
-        s_active_key = -1;
+      /* On single-point hardware the only way a second touch exists is the queued
+       * one, so a liftoff while a queued finger is down belongs to that finger. */
+      if (s_queued.pending && s_queued.finger_down) {
+        s_queued.finger_down = false;  /* queued tone will play its full floor */
+        return;
       }
+      if (s_active_key == -1) return;
+      s_key_finger_down = false;
+      if (s_floor_timer != NULL) {
+        /* Still inside the floor window — floor_timer_cb performs the stop. */
+        return;
+      }
+      /* Floor already elapsed — stop immediately. */
+      stop_audio();
+      s_active_key = -1;
       break;
     }
     case TouchEvent_PositionUpdate:
@@ -547,10 +608,10 @@ static void touch_handler(const TouchEvent *event, void *context) {
 /* Enter (Select) plays the dial tone for as long as it is held. Raw click
  * gives separate press/release callbacks. */
 static void select_down_handler(ClickRecognizerRef r, void *ctx) {
+  cancel_keypad_for_button();  /* a side button preempts/cancels the keypad floor */
   if (s_busy_playing) return;  /* single voice: busy signal owns the speaker */
   if (s_sit_playing) return;   /* single voice: SIT is playing (non-interruptible) */
   if (s_dial_playing) return;
-  cancel_key_state();  /* preempt any held key tone (single voice) */
   play_dial_tone();
   s_dial_playing = true;
 }
@@ -565,9 +626,9 @@ static void select_up_handler(ClickRecognizerRef r, void *ctx) {
  * mutually-exclusive voice: it does not start if a key tone or the dial tone
  * is already sounding, and while it plays, touch and Select are ignored. */
 static void up_down_handler(ClickRecognizerRef r, void *ctx) {
+  cancel_keypad_for_button();  /* preempt/cancel any active keypad tone + floor */
   if (s_busy_playing) return;
   if (s_sit_playing) return;       /* SIT is playing (non-interruptible)            */
-  if (s_active_key != -1) return;  /* a DTMF key is held — don't start (one voice) */
   if (s_dial_playing) return;      /* the dial tone is held — don't start          */
   busy_start();
   s_busy_playing = true;
@@ -583,9 +644,9 @@ static void up_up_handler(ClickRecognizerRef r, void *ctx) {
  * plays (s_sit_playing) every input — including another Down press — is ignored,
  * so the sequence always runs to completion. */
 static void down_sit_handler(ClickRecognizerRef r, void *ctx) {
+  cancel_keypad_for_button();       /* preempt/cancel any active keypad tone + floor */
   if (s_sit_playing) return;
   if (s_busy_playing) return;       /* busy signal is sounding — ignore (one voice) */
-  if (s_active_key != -1) return;   /* a DTMF key tone is sounding — ignore         */
   if (s_dial_playing) return;       /* the dial tone is sounding — ignore           */
   sit_start();
 }
@@ -754,7 +815,12 @@ static void focus_will_change(bool in_focus) {
 
   /* Overlay is appearing: stop the stream and quiesce every voice. */
   stop_audio();         /* stops playback + cancels the refill timer + resets stream */
-  cancel_key_state();   /* cancels the 50ms floor timer, clears s_active_key         */
+  if (s_floor_timer) { app_timer_cancel(s_floor_timer); s_floor_timer = NULL; }
+  s_active_key = -1;
+  s_key_finger_down = false;
+  s_queued.pending = false;
+  s_queued.key_index = -1;
+  s_queued.finger_down = false;
   cancel_dial_state();  /* clears s_dial_playing                                       */
   s_busy_playing = false;
   if (s_sit_timer) { app_timer_cancel(s_sit_timer); s_sit_timer = NULL; }
@@ -811,10 +877,11 @@ static void main_window_unload(Window *window) {
     app_timer_cancel(s_refill_timer);
     s_refill_timer = NULL;
   }
-  if (s_min_duration_timer) {
-    app_timer_cancel(s_min_duration_timer);
-    s_min_duration_timer = NULL;
+  if (s_floor_timer) {
+    app_timer_cancel(s_floor_timer);
+    s_floor_timer = NULL;
   }
+  s_queued.pending = false;
   if (s_sit_timer) {
     app_timer_cancel(s_sit_timer);
     s_sit_timer = NULL;

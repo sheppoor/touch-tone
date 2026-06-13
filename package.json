@@ -1,7 +1,7 @@
 {
   "name": "touch-tone",
   "author": "sheppoor",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "keywords": ["pebble-app"],
   "dependencies": {},
   "pebble": {

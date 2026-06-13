@@ -9,6 +9,8 @@ No menus, no animations, no network. Just an old-school touch tone phone keypad.
 
 This is a demo PT2 touch and speaker sound app, it's not a real dialer.
 
+Install from the [Pebble appstore](https://apps.repebble.com/917ae403a3024a9d979c57d7)
+
 ---
 
 ## Features
@@ -70,7 +72,8 @@ pebble logs --emulator emery
 ### On-device
 
 ```bash
-# In the Pebble mobile app: Settings → Connectivity → Use LAN developer connection. Then, Devices → ⋯ → Enable Dev Connect → note the IP.
+# In the Pebble mobile app: Settings → Connectivity → Use LAN developer connection.
+# Then, Devices → ⋯ → Enable Dev Connect → note the IP.
 pebble install --phone <IP_ADDRESS>
 pebble logs --phone <IP_ADDRESS>
 ```
