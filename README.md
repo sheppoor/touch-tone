@@ -18,10 +18,8 @@ This is a demo PT2 touch and speaker sound app, it's not a real dialer.
 - **Touch-to-play tones** Touch the on-screen buttons to play the
   authentic North American DTMF (Dual-Tone Multi-Frequency) tone pair for as
   long as a button is held.
-- **Dial tone** On the Select button, played for as long as
-  the button is held.
-- **Busy signal** On the Up button,
-  looping for as long as the button is held.
+- **Dial tone** On the Select button, played for as long as the button is held.
+- **Busy signal** On the Up button, looping for as long as the button is held.
 - **Special Information Tone** (SIT "your call cannot be completed" error tone)
   played once on the Down button.
 
@@ -46,20 +44,6 @@ The **other sounds use pre-computed 16-bit/8 kHz buffers** (generated offline by
 alternates a tone buffer and a silence buffer for its 0.5 s on/off cadence, and
 the SIT steps through its three single-frequency tones and gaps by exact sample
 count, then closes the stream so it ends on its own.
-
-## Project layout
-
-```
-touchtone/
-├── package.json                 # App manifest (Emery, sdkVersion 3)
-├── src/c/
-│   ├── main.c                    # All watch logic
-│   └── touch_tone_audio.h        # AUTO-GENERATED buffers + sine table — do not edit
-├── resources/images/
-│   └── app_icon.png              # 25 × 25 px menu icon
-└── tools/
-    └── generate_audio.py         # Regenerates touch_tone_audio.h
-```
 
 ## Building
 

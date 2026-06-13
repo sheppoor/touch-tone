@@ -91,6 +91,7 @@ static AppTimer *s_min_duration_timer = NULL;
 static bool     s_stop_pending = false;   /* finger lifted before 50ms floor*/
 static bool     s_dial_playing = false;   /* true while Enter is held        */
 static bool     s_touch_enabled = false;
+static bool     s_app_in_focus = true;    /* false while a notification/overlay covers us */
 /* Note: the SDK exposes no way to detect a muted speaker (no speaker_is_muted(),
  * no volume getter), so a "muted" status indicator is left unimplemented;
  * quiet_time_is_active() is unrelated — it governs notifications/vibration, not
@@ -500,6 +501,10 @@ static int hit_test_key(int16_t x, int16_t y) {
 }
 
 static void touch_handler(const TouchEvent *event, void *context) {
+  /* A notification/overlay covering the app still leaks touch events through to
+   * the keypad beneath it. While we are out of focus, ignore touch entirely so a
+   * tap on the notification can't trigger an invisible key. */
+  if (!s_app_in_focus) return;
   switch (event->type) {
     case TouchEvent_Touchdown: {
       if (s_busy_playing) break;      /* single voice: busy signal owns the speaker */
@@ -736,6 +741,36 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
 }
 
 /* ------------------------------------------------------------------ */
+/* App focus (notifications / system overlays)                         */
+/* ------------------------------------------------------------------ */
+/* When an overlay (e.g. a notification) covers the app, button events are
+ * redirected to it by the OS, but touch events still leak through to the keypad
+ * underneath. We respond to focus loss by (a) immediately silencing whatever is
+ * playing and (b) clearing s_app_in_focus so touch_handler becomes a no-op until
+ * focus returns. Audio is NOT auto-restarted on return — the user makes a fresh
+ * touch/press. */
+static void focus_will_change(bool in_focus) {
+  if (in_focus) return;  /* re-enable is handled in focus_did_change */
+
+  /* Overlay is appearing: stop the stream and quiesce every voice. */
+  stop_audio();         /* stops playback + cancels the refill timer + resets stream */
+  cancel_key_state();   /* cancels the 50ms floor timer, clears s_active_key         */
+  cancel_dial_state();  /* clears s_dial_playing                                       */
+  s_busy_playing = false;
+  if (s_sit_timer) { app_timer_cancel(s_sit_timer); s_sit_timer = NULL; }
+  s_sit_playing = false;
+  s_sit_closed = false;
+
+  s_app_in_focus = false;
+}
+
+static void focus_did_change(bool in_focus) {
+  if (in_focus) {
+    s_app_in_focus = true;  /* overlay gone — accept touch again on the next tap */
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Window lifecycle (Section 6)                                        */
 /* ------------------------------------------------------------------ */
 static void main_window_load(Window *window) {
@@ -760,9 +795,17 @@ static void main_window_load(Window *window) {
   if (s_touch_enabled) {
     touch_service_subscribe(touch_handler, NULL);
   }
+
+  /* Suspend touch (and silence any in-flight audio) while a notification or other
+   * system overlay covers the app. */
+  app_focus_service_subscribe_handlers((AppFocusHandlers){
+    .will_focus = focus_will_change,
+    .did_focus  = focus_did_change,
+  });
 }
 
 static void main_window_unload(Window *window) {
+  app_focus_service_unsubscribe();
   speaker_stop();  /* immediate stop — no audio leak after exit */
   if (s_refill_timer) {
     app_timer_cancel(s_refill_timer);
