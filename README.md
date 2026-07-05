@@ -1,9 +1,9 @@
 # Touch Tone
 
-> *"Those dulcet tones from the before times."*
-
 A sample [Pebble Time 2](https://repebble.com/) watch app that
 plays the touch tone classic sounds on an old 12-button telephone.
+
+> *"Those dulcet tones from the before times."*
 
 No menus, no animations, no network. Just an old-school touch tone phone keypad.
 
